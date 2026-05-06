@@ -1,0 +1,221 @@
+// =============================================================================
+// PRISMA SCHEMA — InvoiceApp
+// DB: PostgreSQL | ORM: Prisma
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =============================================================================
+// AUTH — Required by Auth.js v5 (NextAuth) Prisma Adapter
+// =============================================================================
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// =============================================================================
+// USER
+// Core identity. One user = one freelancer workspace.
+// =============================================================================
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified DateTime?
+  name          String?
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  accounts          Account[]
+  sessions          Session[]
+  freelancerSettings FreelancerSettings?
+  customers         Customer[]
+  invoices          Invoice[]
+}
+
+// =============================================================================
+// FREELANCER SETTINGS
+// Business identity, banking, and API config per user.
+// =============================================================================
+
+model FreelancerSettings {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Business Identity
+  businessName    String
+  businessEmail   String
+  businessPhone   String?
+  businessAddress String?
+  businessCity    String?
+  businessCountry String?
+  taxId           String?    // VAT / EIN / SIRET
+  logoUrl         String?
+
+  // Banking Details
+  bankName        String?
+  accountName     String?
+  accountNumber   String?
+  routingNumber   String?    // ABA / Sort Code
+  swiftCode       String?    // SWIFT/BIC — exactly 8 or 11 chars
+  iban            String?
+
+  // Invoice Defaults
+  defaultCurrency String  @default("USD")  // ISO 4217
+  defaultTaxRate  Decimal @default(0) @db.Decimal(5, 2)  // 0.00–100.00
+  defaultDueDays  Int     @default(30)     // Net-30 etc.
+  defaultNotes    String? @db.Text
+  invoicePrefix   String  @default("INV")  // e.g. "DEV", "ACME"
+
+  // API Keys (stored encrypted — encrypt at application layer)
+  stripePublishableKey String?
+  stripeSecretKeyHash  String?  // Store only the hash; never the raw key
+  stripeWebhookSecret  String?
+  resendApiKeyHash     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// =============================================================================
+// CUSTOMER
+// Clients that invoices are issued to.
+// =============================================================================
+
+model Customer {
+  id        String   @id @default(cuid())
+  userId    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name         String
+  email        String
+  phone        String?
+  company      String?
+  address      String?
+  city         String?
+  state        String?
+  postalCode   String?
+  country      String?
+  notes        String? @db.Text
+
+  // Stripe customer mirror (for payment links)
+  stripeCustomerId String? @unique
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  invoices Invoice[]
+
+  @@index([userId])
+  @@index([email])
+}
+
+// =============================================================================
+// INVOICE
+// Core business entity.
+// =============================================================================
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  VIEWED      // Client opened the portal link
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+model Invoice {
+  id        String   @id @default(cuid())
+  userId    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Human-readable unique ID: e.g. "DEV-483920174"
+  // Generated via custom utility with retry loop (see lib/invoice-id.ts)
+  invoiceNumber String @unique
+
+  customerId String
+  status     InvoiceStatus @default(DRAFT)
+
+  // Dates
+  issueDate DateTime @default(now())
+  dueDate   DateTime
+
+  // Financial — stored as integer cents to avoid float drift
+  // e.g., $1,234.56 → 123456
+  subtotalCents  Int
+  taxRateBps     Int  @default(0)  // basis points: 2000 = 20.00%
+  taxAmountCents Int  @default(0)
+  totalCents     Int
+
+  currency String @default("USD")
+
+  // Content
+  lineItems Json   // LineItem[] — validated at app layer with Zod
+  notes     String? @db.Text
+
+  // Public portal access
+  publicToken String @unique @default(cuid())  // Used in /pay/[publicToken] route
+
+  // Stripe Payment
+  stripePaymentIntentId String?
+  stripeCheckoutSessionId String?
+  paidAt DateTime?
+
+  // Email tracking
+  sentAt   DateTime?
+  viewedAt DateTime?
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id])
+
+  @@index([userId])
+  @@index([customerId])
+  @@index([status])
+  @@index([invoiceNumber])
+  @@index([publicToken])
+}
